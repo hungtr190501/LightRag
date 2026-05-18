@@ -7,6 +7,7 @@ import { Toaster } from 'sonner'
 import App from './App'
 import LoginPage from '@/features/LoginPage'
 import PublicChat from '@/features/PublicChat'
+import PublicChatHistory from '@/features/PublicChatHistory'
 import ThemeProvider from '@/components/ThemeProvider'
 
 const AppContent = () => {
@@ -54,7 +55,7 @@ const AppContent = () => {
   useEffect(() => {
     if (!initializing && !isAuthenticated) {
       const currentPath = window.location.hash.slice(1);
-      if (currentPath !== '/login' && !currentPath.startsWith('/public-chat')) {
+      if (currentPath !== '/login' && !currentPath.startsWith('/public-chat/')) {
         console.log('Not authenticated, redirecting to login');
         navigate('/login');
       }
@@ -70,6 +71,7 @@ const AppContent = () => {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/public-chat/:workspace" element={<PublicChat />} />
+      <Route path="/public-chat/:workspace/history" element={<PublicChatHistory />} />
       <Route
         path="/*"
         element={isAuthenticated ? <App /> : null}

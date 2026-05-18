@@ -56,6 +56,7 @@ from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.workspace_routes import create_workspace_routes
 from lightrag.api.routers.legal_routes import create_legal_routes, set_legal_singletons
 from lightrag.api.routers.eval_routes import create_eval_routes, set_eval_singletons
+from lightrag.api.routers.public_chat_routes import create_public_chat_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
 from lightrag.api.workspace_manager import WorkspaceManager
 
@@ -1293,6 +1294,7 @@ def create_app(args):
     app.include_router(create_workspace_routes(workspace_manager, api_key))
     app.include_router(create_legal_routes(api_key))
     app.include_router(create_eval_routes(api_key))
+    app.include_router(create_public_chat_routes(args.working_dir, api_key))
 
     # Add Ollama API routes (uses default workspace)
     # Create a temporary uninitialized rag just to extract ollama_server_infos for OllamaAPI init.

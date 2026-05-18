@@ -3,6 +3,9 @@
  * Auto-fetches a guest token on first call if no token is stored.
  */
 import { backendBaseUrl } from '@/lib/constants'
+import type { ReferenceItem } from '@/api/lightrag'
+
+export type { ReferenceItem }
 
 async function getOrFetchToken(): Promise<string | null> {
   const stored = localStorage.getItem('LIGHTRAG-API-TOKEN')
@@ -22,6 +25,7 @@ async function getOrFetchToken(): Promise<string | null> {
 }
 
 export type StreamChunkHandler = (chunk: string) => void
+export type StreamReferencesHandler = (refs: ReferenceItem[]) => void
 export type StreamDoneHandler = () => void
 export type StreamErrorHandler = (err: string) => void
 
@@ -29,7 +33,6 @@ export interface PublicChatRequest {
   query: string
   mode?: string
   top_k?: number
-  stream?: boolean
   workspace?: string
   history_messages?: { role: string; content: string }[]
 }
@@ -39,7 +42,8 @@ export async function streamPublicChat(
   onChunk: StreamChunkHandler,
   onDone: StreamDoneHandler,
   onError: StreamErrorHandler,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onReferences?: StreamReferencesHandler
 ): Promise<void> {
   const token = await getOrFetchToken()
 
@@ -54,6 +58,7 @@ export async function streamPublicChat(
     mode: req.mode ?? 'hybrid',
     top_k: req.top_k ?? 40,
     stream: true,
+    include_references: true,
     history_messages: req.history_messages ?? [],
   }
 
@@ -65,15 +70,18 @@ export async function streamPublicChat(
       body: JSON.stringify(body),
       signal,
     })
-  } catch (err: any) {
-    if (err?.name === 'AbortError') return
-    onError(err?.message ?? 'Network error')
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AbortError') return
+    onError(err instanceof Error ? err.message : 'Network error')
     return
   }
 
   if (!response.ok) {
     let msg = `HTTP ${response.status}`
-    try { msg = (await response.json()).detail ?? msg } catch { /* ignore */ }
+    try {
+      const j = await response.json()
+      msg = j.detail ?? msg
+    } catch { /* ignore */ }
     onError(msg)
     return
   }
@@ -87,6 +95,21 @@ export async function streamPublicChat(
   const decoder = new TextDecoder()
   let buffer = ''
 
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed.response != null) {
+        onChunk(parsed.response)
+      } else if (parsed.references && Array.isArray(parsed.references)) {
+        onReferences?.(parsed.references as ReferenceItem[])
+      } else if (parsed.error) {
+        onError(parsed.error)
+      }
+    } catch { /* not JSON */ }
+  }
+
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -95,32 +118,13 @@ export async function streamPublicChat(
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        try {
-          const parsed = JSON.parse(trimmed)
-          if (parsed.response != null) {
-            onChunk(parsed.response)
-          } else if (parsed.error) {
-            onError(parsed.error)
-          }
-        } catch {
-          // not JSON — skip
-        }
-      }
+      for (const line of lines) processLine(line)
     }
-    // flush remaining buffer
-    if (buffer.trim()) {
-      try {
-        const parsed = JSON.parse(buffer.trim())
-        if (parsed.response != null) onChunk(parsed.response)
-        else if (parsed.error) onError(parsed.error)
-      } catch { /* ignore */ }
+    if (buffer.trim()) processLine(buffer)
+  } catch (err: unknown) {
+    if (!(err instanceof Error && err.name === 'AbortError')) {
+      onError(err instanceof Error ? err.message : 'Stream read error')
     }
-  } catch (err: any) {
-    if (err?.name !== 'AbortError') onError(err?.message ?? 'Stream read error')
   }
 
   onDone()
