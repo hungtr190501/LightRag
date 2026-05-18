@@ -12,8 +12,8 @@ __pycache__/
 venv/
 
 # Enviroment Variable Files
-.env
-.env.backup.*
+# .env
+# .env.backup.*
 
 # Generated Docker Compose files (output of setup wizard)
 docker-compose.*.yml
