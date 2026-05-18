@@ -53,8 +53,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         networkx "numpy>=1.24.0,<3.0.0" \
         nano-vectordb json_repair pipmaster tenacity tiktoken \
         "aiosqlite>=0.20.0" python-dotenv pydantic setuptools packaging \
-        `# LLM — OpenAI-compatible (vLLM)` \
+        `# LLM — OpenAI-compatible (vLLM) + Ollama` \
         "openai>=2.0.0,<3.0.0" \
+        "ollama>=0.1.0,<1.0.0" \
         `# Document processing (PDF + Word)` \
         "pypdf>=6.1.0" "python-docx>=0.8.11,<2.0.0" "pycryptodome>=3.0.0,<4.0.0" \
         `# LegalRAG pipeline` \
