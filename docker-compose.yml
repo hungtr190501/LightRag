@@ -1,0 +1,121 @@
+services:
+  # ── LegalRAG Infrastructure ──────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: legalrag-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: legalrag-neo4j
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: "neo4j/legalrag2024"
+      NEO4J_dbms_memory_heap_max__size: "2G"
+      NEO4J_dbms_memory_pagecache_size: "512M"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--timeout=5", "http://localhost:7474/"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 40s
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  # ── LightRAG Server ───────────────────────────────────────────────────
+  lightrag:
+    # image: ghcr.io/hkuds/lightrag:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      tags:
+        - ghcr.io/hkuds/lightrag:latest
+    ports:
+      - "${HOST:-0.0.0.0}:${PORT:-9621}:9621"
+    volumes:
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./data/inputs:/app/data/inputs
+      - ./config.ini:/app/config.ini
+      - ./.env:/app/.env
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 10
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Server Configuration
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      HOST: "0.0.0.0"
+      PORT: "9621"
+      
+      # vLLM Configuration
+      LLM_MODEL: "qwen3-14b"
+      LLM_BINDING_HOST: "http://192.168.2.181:9061/v1"
+      LLM_BINDING_API_KEY: "not_needed"
+      
+      # Embedding Configuration
+      EMBEDDING_MODEL: "bge-m3"
+      EMBEDDING_BINDING_HOST: "http://192.168.2.181:9062/v1"
+      EMBEDDING_BINDING_API_KEY: "not_needed"
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_TOKEN_LIMIT: "4096"
+      
+      # Reranker Configuration
+      RERANK_BINDING: "cohere"
+      RERANK_MODEL: "reranker"
+      RERANK_BINDING_HOST: "http://192.168.2.182:8787/api/v1/rerank"
+      RERANK_BINDING_API_KEY: "not_needed"
+      RERANK_BY_DEFAULT: "true"
+      MIN_RERANK_SCORE: "0.0"
+      
+      # Storage Configuration
+      KV_STORAGE: "JsonKVStorage"
+      DOC_STATUS_STORAGE: "JsonDocStatusStorage"
+      VECTOR_STORAGE: "JsonVectorStorage"
+      GRAPH_STORAGE: "NetworkxStorage"
+      SEMANTIC_CHUNKING: "true"
+      LANGCHAIN_SEMANTIC_CHUNKER: "true"
+      LANGCHAIN_SEMANTIC_BREAKPOINT_TYPE: "percentile"
+      LANGCHAIN_SEMANTIC_BREAKPOINT_AMOUNT: "95"
+
+      # LegalRAG — Qdrant (hybrid search)
+      QDRANT_HOST: "qdrant"
+      QDRANT_PORT: "6333"
+
+      # LegalRAG — Neo4j (legal knowledge graph)
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USERNAME: "neo4j"
+      NEO4J_PASSWORD: "legalrag2024"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+volumes:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
