@@ -175,7 +175,7 @@ export default function CitationModal({ open, onClose, reference, citationIndex,
         <div className="flex-1 overflow-y-auto min-h-0 px-6 py-4 space-y-3">
           {hasChunkContent ? (
             reference.content!.map((chunk, idx) => (
-              <ChunkContent key={idx} text={chunk} keywords={keywords} />
+              <ChunkContent key={idx} text={chunk} keywords={[]} />
             ))
           ) : (
             <div className="flex items-center justify-center text-sm text-muted-foreground py-8">

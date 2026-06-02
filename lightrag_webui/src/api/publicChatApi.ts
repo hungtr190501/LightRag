@@ -29,12 +29,22 @@ export type StreamReferencesHandler = (refs: ReferenceItem[]) => void
 export type StreamDoneHandler = () => void
 export type StreamErrorHandler = (err: string) => void
 
+export interface AgenticStepEvent {
+  step: 'analyzing' | 'rewriting' | 'retrieving' | 'synthesizing'
+  message?: string
+  rewritten?: string
+  keywords?: string[]
+  sub_questions?: string[]
+}
+export type StreamAgenticStepHandler = (event: AgenticStepEvent) => void
+
 export interface PublicChatRequest {
   query: string
   mode?: string
   top_k?: number
   workspace?: string
   history_messages?: { role: string; content: string }[]
+  enable_agentic?: boolean
 }
 
 export async function streamPublicChat(
@@ -43,7 +53,8 @@ export async function streamPublicChat(
   onDone: StreamDoneHandler,
   onError: StreamErrorHandler,
   signal?: AbortSignal,
-  onReferences?: StreamReferencesHandler
+  onReferences?: StreamReferencesHandler,
+  onAgenticStep?: StreamAgenticStepHandler
 ): Promise<void> {
   const token = await getOrFetchToken()
 
@@ -59,6 +70,8 @@ export async function streamPublicChat(
     top_k: req.top_k ?? 40,
     stream: true,
     include_references: true,
+    include_chunk_content: true,
+    enable_agentic: req.enable_agentic ?? true,
     history_messages: req.history_messages ?? [],
   }
 
@@ -100,7 +113,15 @@ export async function streamPublicChat(
     if (!trimmed) return
     try {
       const parsed = JSON.parse(trimmed)
-      if (parsed.response != null) {
+      if (parsed.agentic_step) {
+        onAgenticStep?.({
+          step: parsed.agentic_step,
+          message: parsed.message,
+          rewritten: parsed.rewritten,
+          keywords: parsed.keywords,
+          sub_questions: parsed.sub_questions,
+        })
+      } else if (parsed.response != null) {
         onChunk(parsed.response)
       } else if (parsed.references && Array.isArray(parsed.references)) {
         onReferences?.(parsed.references as ReferenceItem[])

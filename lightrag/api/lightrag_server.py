@@ -1294,7 +1294,7 @@ def create_app(args):
     app.include_router(create_workspace_routes(workspace_manager, api_key))
     app.include_router(create_legal_routes(api_key))
     app.include_router(create_eval_routes(api_key))
-    app.include_router(create_public_chat_routes(args.working_dir, api_key))
+    app.include_router(create_public_chat_routes(args.working_dir, api_key, workspace_manager))
 
     # Add Ollama API routes (uses default workspace)
     # Create a temporary uninitialized rag just to extract ollama_server_infos for OllamaAPI init.

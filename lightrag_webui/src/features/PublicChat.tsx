@@ -1,14 +1,16 @@
 import {
   type CSSProperties,
-  type ReactNode,
   type KeyboardEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useParams, useNavigate } from 'react-router-dom'
-import { streamPublicChat, type ReferenceItem } from '@/api/publicChatApi'
+import { streamPublicChat, type ReferenceItem, type AgenticStepEvent } from '@/api/publicChatApi'
 import { getPublicChatConfig, updatePublicChatConfig, type PublicChatConfig } from '@/api/workspace'
 import {
   listSessions,
@@ -18,6 +20,7 @@ import {
   type SessionSummary,
   type Feedback,
 } from '@/api/publicChatSessions'
+import { listPublicDocuments, uploadDocument, fetchPublicGraph, type PublicDocument, type GraphData } from '@/api/publicDocuments'
 import CitationModal from '@/components/retrieval/CitationModal'
 import {
   BotIcon,
@@ -35,7 +38,20 @@ import {
   PanelLeftIcon,
   HistoryIcon,
   MessageSquarePlusIcon,
+  UploadIcon,
+  FileTextIcon,
+  CheckCircle2Icon,
+  XCircleIcon,
+  ClockIcon,
+  EyeIcon,
+  NetworkIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  LogInIcon,
+  LogOutIcon,
 } from 'lucide-react'
+import { useAuthStore } from '@/stores/state'
+import PublicLoginModal from '@/components/PublicLoginModal'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,6 +68,7 @@ interface Message {
   error?: boolean
   references?: ReferenceItem[]
   feedback?: Feedback
+  agenticSteps?: AgenticStepEvent[]
 }
 
 const DEFAULT_CONFIG: PublicChatConfig = {
@@ -82,69 +99,60 @@ function fmtDate(iso: string) {
   } catch { return iso }
 }
 
-// ── Markdown-lite ─────────────────────────────────────────────────────────────
+// ── Markdown helpers ──────────────────────────────────────────────────────────
 
-function renderMarkdownLite(text: string): ReactNode[] {
-  const lines = text.split('\n')
-  return lines.map((line, li) => {
-    const parts: ReactNode[] = []
-    const re = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`)/g
-    let last = 0; let m: RegExpExecArray | null; let key = 0
-    while ((m = re.exec(line)) !== null) {
-      if (m.index > last) parts.push(line.slice(last, m.index))
-      if (m[2]) parts.push(<strong key={key++}>{m[2]}</strong>)
-      else if (m[3]) parts.push(<em key={key++}>{m[3]}</em>)
-      else if (m[4]) parts.push(<code key={key++} className="px-1 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[0.88em]">{m[4]}</code>)
-      last = m.index + m[0].length
-    }
-    if (last < line.length) parts.push(line.slice(last))
-    return <span key={li}>{parts}{li < lines.length - 1 && <br />}</span>
-  })
+const REF_SECTION = /\n#{1,3}\s*(Tài liệu tham khảo|Nguồn tham khảo|Căn cứ pháp lý|Tài liệu căn cứ|References?)\s*(\n|$)/i
+
+function stripReferencesSection(text: string): string {
+  const idx = text.search(REF_SECTION)
+  return idx !== -1 ? text.slice(0, idx).trimEnd() : text
 }
 
 // ── Sources row ───────────────────────────────────────────────────────────────
 
-function SourcesRow({ references, query, accent }: { references: ReferenceItem[]; query: string; accent: string }) {
+function SourcesRow({
+  references, accent, onCite,
+}: {
+  references: ReferenceItem[]
+  accent: string
+  onCite: (ref: ReferenceItem, idx: string) => void
+}) {
   const [open, setOpen] = useState(false)
-  const [selected, setSelected] = useState<{ ref: ReferenceItem; idx: string } | null>(null)
   if (!references.length) return null
   return (
-    <>
-      <div className="mt-3">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 text-xs font-medium mb-2"
-          style={{ color: accent }}
-        >
-          <BookOpenIcon className="size-3.5" />
-          {references.length} tài liệu căn cứ
-          <span className="text-zinc-400 font-normal">{open ? '↑' : '↓'}</span>
-        </button>
-        {open && (
-          <div className="flex flex-wrap gap-2">
-            {references.map((ref, i) => {
-              const idx = ref.reference_id ?? String(i + 1)
-              return (
-                <button
-                  key={ref.chunk_id ?? i}
-                  onClick={() => setSelected({ ref, idx })}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors"
-                  style={{ borderColor: `${accent}55`, color: accent } as CSSProperties}
-                  onMouseEnter={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.backgroundColor = accent; el.style.color = '#fff'; el.style.borderColor = accent }}
-                  onMouseLeave={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.backgroundColor = ''; el.style.color = accent; el.style.borderColor = `${accent}55` }}
-                  title={ref.file_path}
-                >
-                  <BookOpenIcon className="size-3 shrink-0" />
-                  <span className="font-mono">[{idx}]</span>
-                  <span className="max-w-[160px] truncate">{getFileName(ref.file_path)}</span>
-                </button>
-              )
-            })}
-          </div>
-        )}
-      </div>
-      <CitationModal open={selected !== null} onClose={() => setSelected(null)} reference={selected?.ref ?? null} citationIndex={selected?.idx ?? ''} query={query} />
-    </>
+    <div className="mt-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-xs font-medium mb-2"
+        style={{ color: accent }}
+      >
+        <BookOpenIcon className="size-3.5" />
+        {references.length} tài liệu căn cứ
+        <span className="text-zinc-400 font-normal">{open ? '↑' : '↓'}</span>
+      </button>
+      {open && (
+        <div className="flex flex-wrap gap-2">
+          {references.map((ref, i) => {
+            const idx = String(i + 1)
+            return (
+              <button
+                key={ref.chunk_id ?? i}
+                onClick={() => onCite(ref, idx)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors"
+                style={{ borderColor: `${accent}55`, color: accent } as CSSProperties}
+                onMouseEnter={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.backgroundColor = accent; el.style.color = '#fff'; el.style.borderColor = accent }}
+                onMouseLeave={(e) => { const el = e.currentTarget as HTMLButtonElement; el.style.backgroundColor = ''; el.style.color = accent; el.style.borderColor = `${accent}55` }}
+                title={ref.file_path}
+              >
+                <BookOpenIcon className="size-3 shrink-0" />
+                <span className="font-mono">[{idx}]</span>
+                <span className="max-w-[160px] truncate">{getFileName(ref.file_path)}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -237,6 +245,397 @@ function ConfigPanel({ workspace, config, onSaved, onClose }: {
 
 // ── Session sidebar ───────────────────────────────────────────────────────────
 
+// ── Sources panel ─────────────────────────────────────────────────────────────
+
+function DocStatusBadge({ status }: { status: string }) {
+  if (status === 'processed')
+    return <CheckCircle2Icon className="size-3.5 text-emerald-500 shrink-0" />
+  if (status === 'failed')
+    return <XCircleIcon className="size-3.5 text-red-500 shrink-0" />
+  return <ClockIcon className="size-3.5 text-amber-400 shrink-0 animate-pulse" />
+}
+
+function DocViewModal({ doc, onClose }: { doc: PublicDocument; onClose: () => void }) {
+  const filename = doc.file_path.split('/').pop() || doc.file_path
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-lg bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
+          <div className="flex items-center gap-2 min-w-0">
+            <FileTextIcon className="size-4 text-zinc-400 shrink-0" />
+            <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">{filename}</span>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400">
+            <XIcon className="size-4" />
+          </button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="flex items-center gap-3 text-xs text-zinc-500">
+            <span className="flex items-center gap-1"><DocStatusBadge status={doc.status} />{doc.status}</span>
+            {doc.chunks_count != null && <span>{doc.chunks_count} đoạn</span>}
+            {doc.created_at && <span>{new Date(doc.created_at).toLocaleDateString('vi-VN')}</span>}
+          </div>
+          {doc.content_summary && (
+            <div>
+              <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wide mb-1.5">Nội dung mẫu</div>
+              <p className="text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap bg-zinc-50 dark:bg-zinc-800/60 rounded-xl p-3 max-h-48 overflow-y-auto">
+                {doc.content_summary}
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Graph modal ───────────────────────────────────────────────────────────────
+
+import { UndirectedGraph } from 'graphology'
+import { SigmaContainer, useRegisterEvents, useSigma } from '@react-sigma/core'
+import { NodeBorderProgram } from '@sigma/node-border'
+import { createEdgeCurveProgram } from '@sigma/edge-curve'
+import { resolveNodeColor } from '@/utils/graphColor'
+import { labelColorDarkTheme, nodeBorderColor, minNodeSize, maxNodeSize } from '@/lib/constants'
+import '@react-sigma/core/lib/style.css'
+
+function drawDarkNodeHover(
+  context: CanvasRenderingContext2D,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  settings: any,
+): void {
+  const label = data.label as string | undefined
+  if (!label) return
+  const size: number = settings.labelSize
+  const font: string = settings.labelFont
+  const weight: string = settings.labelWeight
+  context.font = `${weight} ${size}px ${font}`
+  const PADDING = 2
+  const textWidth = context.measureText(label).width
+  const boxHeight = Math.round(size + 2 * PADDING)
+  const radius = Math.max(data.size as number, size / 2) + PADDING
+  const angleRadian = Math.asin(boxHeight / 2 / radius)
+  const xDeltaCoord = Math.sqrt(Math.abs(Math.pow(radius, 2) - Math.pow(boxHeight / 2, 2)))
+  const boxWidth = Math.round(textWidth + 5)
+
+  context.fillStyle = 'rgba(12, 12, 18, 0.94)'
+  context.shadowOffsetX = 0
+  context.shadowOffsetY = 0
+  context.shadowBlur = 8
+  context.shadowColor = 'rgba(255,255,255,0.12)'
+  context.beginPath()
+  context.moveTo(data.x + xDeltaCoord, data.y + boxHeight / 2)
+  context.lineTo(data.x + radius + boxWidth, data.y + boxHeight / 2)
+  context.lineTo(data.x + radius + boxWidth, data.y - boxHeight / 2)
+  context.lineTo(data.x + xDeltaCoord, data.y - boxHeight / 2)
+  context.arc(data.x, data.y, radius, angleRadian, -angleRadian)
+  context.closePath()
+  context.fill()
+  context.shadowOffsetX = 0
+  context.shadowOffsetY = 0
+  context.shadowBlur = 0
+
+  context.fillStyle = '#ffffff'
+  context.fillText(label, data.x + data.size + 3, data.y + size / 3)
+}
+
+function GraphDragEvents() {
+  const registerEvents = useRegisterEvents()
+  const sigma = useSigma()
+  const [draggedNode, setDraggedNode] = useState<string | null>(null)
+
+  useEffect(() => {
+    registerEvents({
+      downNode: (e) => {
+        setDraggedNode(e.node)
+        sigma.getGraph().setNodeAttribute(e.node, 'highlighted', true)
+      },
+      mousemovebody: (e) => {
+        if (!draggedNode) return
+        const pos = sigma.viewportToGraph(e)
+        sigma.getGraph().setNodeAttribute(draggedNode, 'x', pos.x)
+        sigma.getGraph().setNodeAttribute(draggedNode, 'y', pos.y)
+        e.preventSigmaDefault()
+        e.original.preventDefault()
+        e.original.stopPropagation()
+      },
+      mouseup: () => {
+        if (draggedNode) {
+          setDraggedNode(null)
+          sigma.getGraph().removeNodeAttribute(draggedNode, 'highlighted')
+        }
+      },
+      mousedown: (e) => {
+        const mouseEvent = e.original as MouseEvent
+        if (mouseEvent.buttons !== 0 && !sigma.getCustomBBox()) {
+          sigma.setCustomBBox(sigma.getBBox())
+        }
+      },
+    })
+  }, [registerEvents, sigma, draggedNode])
+
+  return null
+}
+
+function buildPublicGraph(data: GraphData): { graph: UndirectedGraph; colorMap: Map<string, string> } {
+  const graph = new UndirectedGraph()
+  let colorMap = new Map<string, string>()
+
+  // Collect degrees first
+  const degreeCount = new Map<string, number>()
+  data.edges.forEach((e) => {
+    degreeCount.set(e.source, (degreeCount.get(e.source) ?? 0) + 1)
+    degreeCount.set(e.target, (degreeCount.get(e.target) ?? 0) + 1)
+  })
+  const maxDeg = Math.max(1, ...Array.from(degreeCount.values()))
+  const minDeg = Math.min(...Array.from(degreeCount.values()))
+  const degRange = maxDeg - minDeg || 1
+
+  const added = new Set<string>()
+  data.nodes.forEach((n) => {
+    if (added.has(n.id)) return
+    added.add(n.id)
+    const label = String(n.properties?.entity_id ?? n.labels?.[0] ?? n.id)
+    const entityType = (n.properties?.entity_type as string | undefined) ?? n.labels?.[0] ?? ''
+    const { color, map } = resolveNodeColor(entityType, colorMap)
+    colorMap = map
+    const deg = degreeCount.get(n.id) ?? 0
+    const size = minNodeSize + (maxNodeSize - minNodeSize) * Math.pow((deg - minDeg) / degRange, 0.5)
+    graph.addNode(n.id, {
+      label,
+      color,
+      x: Math.random(),
+      y: Math.random(),
+      size: Math.max(minNodeSize, size),
+      borderColor: nodeBorderColor,
+      borderSize: 0.2,
+    })
+  })
+
+  data.edges.forEach((e) => {
+    if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return
+    if (!graph.hasEdge(e.source, e.target)) {
+      try {
+        graph.addEdge(e.source, e.target, {
+          type: 'curvedNoArrow',
+          size: 1.5,
+          label: (e.properties?.keywords as string | undefined) ?? undefined,
+        })
+      } catch { /* duplicate edge */ }
+    }
+  })
+
+  return { graph, colorMap }
+}
+
+function PublicGraphModal({ workspace, accent, onClose }: { workspace: string; accent: string; onClose: () => void }) {
+  const [loading, setLoading] = useState(true)
+  const [fullscreen, setFullscreen] = useState(false)
+  const [sigmaGraph, setSigmaGraph] = useState<UndirectedGraph | null>(null)
+  const [colorMap, setColorMap] = useState<Map<string, string>>(new Map())
+  const [counts, setCounts] = useState({ nodes: 0, edges: 0 })
+
+  useEffect(() => {
+    fetchPublicGraph(workspace, 3000)
+      .then((data) => {
+        const { graph, colorMap: cm } = buildPublicGraph(data)
+        setSigmaGraph(graph)
+        setColorMap(cm)
+        setCounts({ nodes: data.nodes.length, edges: data.edges.length })
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [workspace])
+
+  const sigmaSettings = {
+    allowInvalidContainer: true,
+    defaultEdgeType: 'curvedNoArrow',
+    renderEdgeLabels: false,
+    defaultEdgeColor: '#52525b',
+    labelColor: { color: labelColorDarkTheme },
+    labelSize: 13,
+    labelGridCellSize: 80,
+    labelRenderedSizeThreshold: 10,
+    edgeProgramClasses: { curvedNoArrow: createEdgeCurveProgram() },
+    nodeProgramClasses: { default: NodeBorderProgram },
+    defaultNodeType: 'default',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    defaultDrawNodeHover: drawDarkNodeHover as any,
+  }
+
+  const containerClass = fullscreen ? 'fixed inset-0 z-[60]' : 'fixed inset-4 z-50 rounded-2xl overflow-hidden'
+
+  return (
+    <div className={`${containerClass} flex flex-col bg-zinc-950 shadow-2xl`}>
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 bg-zinc-900 border-b border-zinc-800 shrink-0">
+        <div className="flex items-center gap-2">
+          <NetworkIcon className="size-4" style={{ color: accent }} />
+          <span className="text-sm font-semibold text-zinc-100">Đồ thị quan hệ</span>
+          {!loading && sigmaGraph && (
+            <span className="text-xs text-zinc-500 font-mono">{counts.nodes} nút · {counts.edges} cạnh</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={() => setFullscreen(v => !v)} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">
+            {fullscreen ? <Minimize2Icon className="size-4" /> : <Maximize2Icon className="size-4" />}
+          </button>
+          <button onClick={onClose} className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">
+            <XIcon className="size-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Graph canvas */}
+        <div className="flex-1 relative overflow-hidden">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <Loader2Icon className="size-8 animate-spin text-zinc-500" />
+              <span className="text-xs text-zinc-500">Đang tải đồ thị…</span>
+            </div>
+          ) : !sigmaGraph || counts.nodes === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-zinc-500">
+              <NetworkIcon className="size-12 opacity-20" />
+              <span className="text-sm">Chưa có dữ liệu đồ thị</span>
+            </div>
+          ) : (
+            <SigmaContainer graph={sigmaGraph} className="size-full !bg-zinc-950" settings={sigmaSettings}>
+              <GraphDragEvents />
+            </SigmaContainer>
+          )}
+        </div>
+
+        {/* Legend panel */}
+        {!loading && colorMap.size > 0 && (
+          <div className="w-44 shrink-0 border-l border-zinc-800 bg-zinc-900/60 overflow-y-auto p-3">
+            <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide mb-2">Chú giải</div>
+            <div className="space-y-1.5">
+              {Array.from(colorMap.entries()).map(([type, color]) => (
+                <div key={type} className="flex items-center gap-2">
+                  <div className="size-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
+                  <span className="text-[11px] text-zinc-300 truncate capitalize">{type}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      {!loading && counts.nodes > 0 && (
+        <div className="px-4 py-1.5 text-[10px] text-zinc-600 bg-zinc-900/50 shrink-0 border-t border-zinc-800">
+          Kéo để di chuyển · Cuộn để zoom
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SourcesPanel({ workspace, accent, isAdmin }: { workspace: string; accent: string; isAdmin: boolean }) {
+  const [docs, setDocs] = useState<PublicDocument[]>([])
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [viewDoc, setViewDoc] = useState<PublicDocument | null>(null)
+  const [showGraph, setShowGraph] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const fetchDocs = useCallback(() => {
+    listPublicDocuments(workspace)
+      .then(setDocs)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [workspace])
+
+  useEffect(() => {
+    fetchDocs()
+    const timer = setInterval(fetchDocs, 10_000)
+    return () => clearInterval(timer)
+  }, [fetchDocs])
+
+  const handleUpload = async (file: File) => {
+    setUploading(true)
+    try {
+      await uploadDocument(workspace, file)
+      await fetchDocs()
+    } catch { /* ignore */ }
+    finally { setUploading(false) }
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Action bar */}
+      <div className="px-3 py-2 border-b border-zinc-200 dark:border-zinc-800 shrink-0 flex flex-col gap-2">
+        {isAdmin && (
+          <>
+            <input ref={fileRef} type="file" className="hidden" accept=".pdf,.docx,.doc,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUpload(f); e.target.value = '' }} />
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-dashed border-zinc-300 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:border-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 disabled:opacity-50 transition-colors"
+            >
+              {uploading ? <Loader2Icon className="size-3.5 animate-spin" /> : <UploadIcon className="size-3.5" />}
+              {uploading ? 'Đang tải lên…' : 'Tải lên tài liệu'}
+            </button>
+          </>
+        )}
+        <button
+          onClick={() => setShowGraph(true)}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400 hover:border-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+          style={{ borderColor: `${accent}44`, color: accent }}
+        >
+          <NetworkIcon className="size-3.5" />
+          Xem đồ thị quan hệ
+        </button>
+      </div>
+
+      {/* Document list */}
+      <div className="flex-1 overflow-y-auto py-1">
+        {loading ? (
+          <div className="flex justify-center py-8"><Loader2Icon className="size-4 animate-spin text-zinc-400" /></div>
+        ) : docs.length === 0 ? (
+          <div className="text-xs text-zinc-400 text-center py-8 px-3">Chưa có tài liệu nào</div>
+        ) : (
+          docs.map((doc) => {
+            const filename = doc.file_path.split('/').pop() || doc.file_path
+            return (
+              <div key={doc.id} className="flex items-center gap-2 px-3 py-2 mx-1 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800/50 group">
+                <DocStatusBadge status={doc.status} />
+                <span className="flex-1 text-xs text-zinc-700 dark:text-zinc-300 truncate leading-snug" title={filename}>
+                  {filename}
+                </span>
+                <button
+                  onClick={() => setViewDoc(doc)}
+                  className="shrink-0 p-1 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Xem nội dung"
+                >
+                  <EyeIcon className="size-3.5" />
+                </button>
+              </div>
+            )
+          })
+        )}
+      </div>
+
+      {/* Count footer */}
+      {!loading && docs.length > 0 && (
+        <div className="border-t border-zinc-200 dark:border-zinc-800 px-3 py-2 shrink-0">
+          <span className="text-[10px] text-zinc-400">{docs.filter(d => d.status === 'processed').length}/{docs.length} tài liệu đã xử lý</span>
+        </div>
+      )}
+
+      {viewDoc && <DocViewModal doc={viewDoc} onClose={() => setViewDoc(null)} />}
+      {showGraph && <PublicGraphModal workspace={workspace} accent={accent} onClose={() => setShowGraph(false)} />}
+    </div>
+  )
+}
+
 function SessionSidebar({ sessions, currentId, accent, onSelect, onNew, onHistory, loading }: {
   sessions: SessionSummary[]; currentId: string | null; accent: string
   onSelect: (id: string) => void; onNew: () => void; onHistory: () => void; loading: boolean
@@ -289,6 +688,84 @@ function SessionSidebar({ sessions, currentId, accent, onSelect, onNew, onHistor
   )
 }
 
+// ── Agentic step indicator ────────────────────────────────────────────────────
+
+const STEP_LABELS: Record<string, string> = {
+  analyzing: 'Phân tích câu hỏi',
+  rewriting: 'Cải thiện truy vấn',
+  retrieving: 'Tra cứu văn bản',
+  synthesizing: 'Tổng hợp câu trả lời',
+}
+
+const STEP_ORDER = ['analyzing', 'rewriting', 'retrieving', 'synthesizing']
+
+function AgenticStepsIndicator({
+  steps,
+  streaming,
+  accent,
+}: {
+  steps: AgenticStepEvent[]
+  streaming: boolean
+  accent: string
+}) {
+  if (!steps.length) return null
+
+  const doneSteps = new Set(steps.map((s) => s.step))
+  const lastStep = steps[steps.length - 1]
+  const rewrittenQuery = steps.find((s) => s.rewritten)?.rewritten
+  const subQuestions = steps.find((s) => s.sub_questions?.length)?.sub_questions
+
+  return (
+    <div className="mb-3 text-xs">
+      {/* Step pills */}
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {STEP_ORDER.map((step) => {
+          const done = doneSteps.has(step)
+          const isActive = streaming && lastStep.step === step
+          return (
+            <span
+              key={step}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-medium transition-all ${
+                done
+                  ? isActive
+                    ? 'text-white'
+                    : 'opacity-70'
+                  : 'opacity-20 text-zinc-400'
+              }`}
+              style={done ? { backgroundColor: isActive ? accent : `${accent}30`, color: isActive ? '#fff' : accent } : undefined}
+            >
+              {isActive && streaming ? (
+                <span className="size-1.5 rounded-full animate-pulse inline-block" style={{ backgroundColor: '#fff' }} />
+              ) : done ? (
+                <span className="size-1.5 rounded-full inline-block" style={{ backgroundColor: accent }} />
+              ) : null}
+              {STEP_LABELS[step] ?? step}
+            </span>
+          )
+        })}
+      </div>
+      {/* Rewritten query */}
+      {rewrittenQuery && rewrittenQuery !== lastStep.message && (
+        <div className="pl-1 text-zinc-500 dark:text-zinc-400 italic leading-relaxed">
+          <span className="not-italic font-medium text-zinc-400">Truy vấn:</span>{' '}
+          {rewrittenQuery}
+        </div>
+      )}
+      {/* Sub-questions for multi-hop */}
+      {subQuestions && subQuestions.length > 0 && (
+        <div className="pl-1 mt-1 space-y-0.5">
+          {subQuestions.map((q, i) => (
+            <div key={i} className="text-zinc-400 flex gap-1.5">
+              <span className="shrink-0" style={{ color: accent }}>↳</span>
+              <span>{q}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Message bubbles ───────────────────────────────────────────────────────────
 
 function UserBubble({ content }: { content: string }) {
@@ -306,6 +783,94 @@ function AssistantBubble({ msg, accent, onFeedback }: {
 }) {
   const isLiked = msg.feedback === 'like'
   const isDisliked = msg.feedback === 'dislike'
+  const [citeSelected, setCiteSelected] = useState<{ ref: ReferenceItem; idx: string } | null>(null)
+
+  const refs = msg.references ?? []
+
+  // Sequential citation map: "1","2","3"... → ref (order matches the refs array)
+  const refByNum = useMemo(() => {
+    const m = new Map<string, ReferenceItem>()
+    refs.forEach((r, i) => m.set(String(i + 1), r))
+    return m
+  }, [refs])
+
+  // Remap original reference_ids → sequential numbers for display.
+  // LLM text may cite [12],[7] but we renumber them to [1],[2] matching the refs array order.
+  const idRemap = useMemo(() => {
+    const m = new Map<string, string>()
+    refs.forEach((r, i) => {
+      const id = String(r.reference_id ?? '')
+      if (id) m.set(id, String(i + 1))
+    })
+    return m
+  }, [refs])
+
+  // Pre-process text: strip refs section + normalize markdown + renumber + convert to links
+  const displayText = useMemo(() => {
+    if (!msg.content) return ''
+    let text = refs.length > 0 ? stripReferencesSection(msg.content) : msg.content
+    // Collapse [N][N] duplicate citations the LLM sometimes emits
+    text = text.replace(/(\[\d+\])(\s*\1)+/g, '$1')
+    // Fix ###N. / ###Word (no space after #) → ### N. / ### Word
+    text = text.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2')
+    // Remap original reference_ids → sequential 1,2,3...
+    if (idRemap.size > 0) {
+      text = text.replace(/\[(\d+)\]/g, (match, num) => {
+        const seq = idRemap.get(num)
+        return seq ? `[${seq}]` : match
+      })
+    }
+    // Convert bare [N] to markdown links only when a matching ref exists
+    text = text.replace(/\[(\d+)\]/g, (match, num) => refByNum.has(num) ? `[${match}](#cite-${num})` : match)
+    return text
+  }, [msg.content, refs, refByNum, idRemap])
+
+  // Markdown components
+  const mdComponents = useMemo(() => ({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    p: ({ children, ...props }: any) => <p className="mb-2 last:mb-0" {...props}>{children}</p>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h1: ({ children, ...props }: any) => <h1 className="text-base font-bold mt-3 mb-1" {...props}>{children}</h1>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h2: ({ children, ...props }: any) => <h2 className="text-sm font-bold mt-3 mb-1" {...props}>{children}</h2>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h3: ({ children, ...props }: any) => <h3 className="text-sm font-semibold mt-2 mb-1 text-zinc-700 dark:text-zinc-300" {...props}>{children}</h3>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ul: ({ children, ...props }: any) => <ul className="list-disc list-inside space-y-0.5 mb-2 pl-1" {...props}>{children}</ul>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ol: ({ children, ...props }: any) => <ol className="list-decimal list-inside space-y-0.5 mb-2 pl-1" {...props}>{children}</ol>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    li: ({ children, ...props }: any) => <li className="text-zinc-700 dark:text-zinc-300" {...props}>{children}</li>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    strong: ({ children, ...props }: any) => <strong className="font-semibold text-zinc-900 dark:text-zinc-100" {...props}>{children}</strong>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    code: ({ children, inline, ...props }: any) => inline
+      ? <code className="px-1 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 font-mono text-[0.88em] text-zinc-700 dark:text-zinc-300" {...props}>{children}</code>
+      : <code className="block p-3 rounded-lg bg-zinc-100 dark:bg-zinc-800 font-mono text-xs overflow-x-auto mb-2" {...props}>{children}</code>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    blockquote: ({ children, ...props }: any) => <blockquote className="border-l-2 border-zinc-300 dark:border-zinc-600 pl-3 italic text-zinc-600 dark:text-zinc-400 mb-2" {...props}>{children}</blockquote>,
+    // [N] citations become links with href="#cite-N" — intercept here
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    a: ({ href, children }: any) => {
+      if (href?.startsWith('#cite-')) {
+        const num = href.slice(6)
+        const ref = refByNum.get(num)
+        if (ref) return (
+          <button
+            onClick={() => setCiteSelected({ ref, idx: num })}
+            className="inline-flex items-center justify-center px-1 py-0.5 mx-0.5 rounded font-mono text-[0.78em] font-semibold leading-none transition-colors hover:opacity-80"
+            style={{ backgroundColor: `${accent}20`, color: accent }}
+            title={getFileName(ref.file_path)}
+          >
+            {children}
+          </button>
+        )
+      }
+      return <a href={href} target="_blank" rel="noreferrer" className="underline" style={{ color: accent }}>{children}</a>
+    },
+  }), [accent, refByNum, setCiteSelected])
+
+  const agenticSteps = msg.agenticSteps ?? []
 
   return (
     <div className="flex gap-3 mb-6 items-start">
@@ -313,20 +878,24 @@ function AssistantBubble({ msg, accent, onFeedback }: {
         <BotIcon className="size-4" />
       </div>
       <div className="flex-1 min-w-0">
+        {agenticSteps.length > 0 && (
+          <AgenticStepsIndicator steps={agenticSteps} streaming={!!msg.streaming} accent={accent} />
+        )}
         {msg.error ? (
           <div className="text-sm text-red-500 dark:text-red-400 leading-relaxed">{msg.content}</div>
         ) : msg.content ? (
           <>
-            <div className="text-sm leading-[1.8] text-zinc-800 dark:text-zinc-200">
-              {renderMarkdownLite(msg.content)}
+            <div className="text-sm leading-[1.8] text-zinc-800 dark:text-zinc-200 prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:text-zinc-800 dark:prose-headings:text-zinc-200">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                {displayText}
+              </ReactMarkdown>
               {msg.streaming && <span className="inline-block w-[2px] h-[14px] ml-0.5 bg-zinc-400 rounded animate-pulse align-text-bottom" />}
             </div>
             {!msg.streaming && (
               <>
-                {msg.references && msg.references.length > 0 && (
-                  <SourcesRow references={msg.references} query={msg.query ?? ''} accent={accent} />
+                {refs.length > 0 && (
+                  <SourcesRow references={refs} accent={accent} onCite={(ref, idx) => setCiteSelected({ ref, idx })} />
                 )}
-                {/* Like / Dislike */}
                 {msg.serverId && (
                   <div className="flex items-center gap-1 mt-2">
                     <button
@@ -354,6 +923,13 @@ function AssistantBubble({ msg, accent, onFeedback }: {
           </div>
         )}
       </div>
+      <CitationModal
+        open={citeSelected !== null}
+        onClose={() => setCiteSelected(null)}
+        reference={citeSelected?.ref ?? null}
+        citationIndex={citeSelected?.idx ?? ''}
+        query={msg.query ?? ''}
+      />
     </div>
   )
 }
@@ -399,7 +975,10 @@ export default function PublicChat() {
   const [streaming, setStreaming] = useState(false)
   const [showConfig, setShowConfig] = useState(false)
   const [showSidebar, setShowSidebar] = useState(true)
+  const [sidebarTab, setSidebarTab] = useState<'sessions' | 'sources'>('sessions')
   const [copied, setCopied] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(!!localStorage.getItem('LIGHTRAG-API-TOKEN'))
+  const [showLogin, setShowLogin] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -564,6 +1143,13 @@ export default function PublicChat() {
       (refs) => {
         finalRefs = refs
         setMessages((prev) => prev.map((m: Message) => m.id === assistantId ? { ...m, references: refs } : m))
+      },
+      (stepEvent) => {
+        setMessages((prev) => prev.map((m: Message) =>
+          m.id === assistantId
+            ? { ...m, agenticSteps: [...(m.agenticSteps ?? []), stepEvent] }
+            : m
+        ))
       }
     )
   }, [input, streaming, messages, config, workspace, ensureSession, refreshSessions, scrollToBottom])
@@ -625,6 +1211,23 @@ export default function PublicChat() {
             <button onClick={() => setShowConfig(true)} title="Cấu hình" className="p-2 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
               <Settings2Icon className="size-4" />
             </button>
+            {isAdmin ? (
+              <button
+                onClick={() => { useAuthStore.getState().logout(); setIsAdmin(false) }}
+                title="Đăng xuất"
+                className="p-2 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <LogOutIcon className="size-4" />
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowLogin(true)}
+                title="Đăng nhập quản trị"
+                className="p-2 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <LogInIcon className="size-4" />
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -634,15 +1237,32 @@ export default function PublicChat() {
         {/* Sidebar */}
         {showSidebar && (
           <div className="w-60 shrink-0 border-r border-zinc-200 dark:border-zinc-800 overflow-hidden flex flex-col bg-white dark:bg-zinc-950">
-            <SessionSidebar
-              sessions={sessions}
-              currentId={currentSessionId}
-              accent={accent}
-              onSelect={loadSession}
-              onNew={newSession}
-              onHistory={() => navigate(`/public-chat/${workspace}/history`)}
-              loading={sessionsLoading}
-            />
+            {/* Tab bar */}
+            <div className="flex shrink-0 border-b border-zinc-200 dark:border-zinc-800">
+              {(['sessions', 'sources'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setSidebarTab(tab)}
+                  className={`flex-1 py-2.5 text-[11px] font-medium transition-colors ${sidebarTab === tab ? 'border-b-2 text-zinc-900 dark:text-zinc-100' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'}`}
+                  style={sidebarTab === tab ? { borderColor: accent } as CSSProperties : undefined}
+                >
+                  {tab === 'sessions' ? 'Hội thoại' : 'Nguồn'}
+                </button>
+              ))}
+            </div>
+            {sidebarTab === 'sessions' ? (
+              <SessionSidebar
+                sessions={sessions}
+                currentId={currentSessionId}
+                accent={accent}
+                onSelect={loadSession}
+                onNew={newSession}
+                onHistory={() => navigate(`/public-chat/${workspace}/history`)}
+                loading={sessionsLoading}
+              />
+            ) : (
+              <SourcesPanel workspace={workspace} accent={accent} isAdmin={isAdmin} />
+            )}
           </div>
         )}
 
@@ -711,6 +1331,12 @@ export default function PublicChat() {
 
       {/* Modals */}
       {showConfig && <ConfigPanel workspace={workspace} config={config} onSaved={setConfig} onClose={() => setShowConfig(false)} />}
+      {showLogin && (
+        <PublicLoginModal
+          onClose={() => setShowLogin(false)}
+          onSuccess={() => setIsAdmin(true)}
+        />
+      )}
     </div>
   )
 }

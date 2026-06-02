@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from lightrag.api.utils_api import get_combined_auth_dependency
@@ -115,11 +115,107 @@ def _summary(session: Dict[str, Any]) -> SessionSummary:
     )
 
 
+# ── Document helpers ──────────────────────────────────────────────────────────
+
+class PublicDocumentItem(BaseModel):
+    id: str
+    file_path: str
+    status: str
+    chunks_count: Optional[int] = None
+    created_at: str
+    content_summary: str
+
+
+class PublicWorkspaceItem(BaseModel):
+    name: str
+    title: str
+    description: str
+    accent_color: str
+
+
+def _doc_status_path(working_dir: str, workspace: str) -> Path:
+    return Path(working_dir) / workspace / "kv_store_doc_status.json"
+
+
+def _workspaces_path(working_dir: str) -> Path:
+    return Path(working_dir) / ".workspaces.json"
+
+
 # ── Router factory ────────────────────────────────────────────────────────────
 
-def create_public_chat_routes(working_dir: str, api_key: Optional[str] = None) -> APIRouter:
+def create_public_chat_routes(working_dir: str, api_key: Optional[str] = None, workspace_manager=None) -> APIRouter:
     router = APIRouter(prefix="/public-chat", tags=["public-chat"])
     combined_auth = get_combined_auth_dependency(api_key)
+
+    # ── Public workspace list ─────────────────────────────────────────────────
+
+    @router.get("/workspaces", response_model=List[PublicWorkspaceItem])
+    async def list_public_workspaces():
+        """List workspaces that have a public chat config set up."""
+        ws_file = _workspaces_path(working_dir)
+        if not ws_file.exists():
+            return []
+        try:
+            data: Dict[str, Any] = json.loads(ws_file.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        result = []
+        for ws_name, ws_data in data.items():
+            cfg = ws_data.get("public_chat_config", {})
+            if cfg:
+                result.append(PublicWorkspaceItem(
+                    name=ws_name,
+                    title=cfg.get("title") or ws_name,
+                    description=cfg.get("description", ""),
+                    accent_color=cfg.get("accent_color", "#10b981"),
+                ))
+        return result
+
+    # ── Public document list ──────────────────────────────────────────────────
+
+    @router.get("/{workspace}/documents", response_model=List[PublicDocumentItem])
+    async def list_workspace_documents(workspace: str):
+        """List indexed documents for a workspace (public, read-only)."""
+        doc_file = _doc_status_path(working_dir, workspace)
+        if not doc_file.exists():
+            return []
+        try:
+            data: Dict[str, Any] = json.loads(doc_file.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        items = []
+        for doc_id, doc in data.items():
+            summary = doc.get("content_summary", "") or ""
+            items.append(PublicDocumentItem(
+                id=doc_id,
+                file_path=doc.get("file_path", ""),
+                status=doc.get("status", ""),
+                chunks_count=doc.get("chunks_count"),
+                created_at=doc.get("created_at", ""),
+                content_summary=summary,
+            ))
+        return sorted(items, key=lambda x: x.created_at, reverse=True)
+
+    # ── Public knowledge graph ─────────────────────────────────────────────────
+
+    @router.get("/{workspace}/graph")
+    async def get_workspace_graph(
+        workspace: str,
+        max_nodes: int = Query(300, ge=1, le=3000),
+        max_depth: int = Query(3, ge=1, le=5),
+    ):
+        """Return knowledge graph data for a workspace (public, read-only)."""
+        if workspace_manager is None:
+            raise HTTPException(status_code=503, detail="Graph not available")
+        try:
+            rag = await workspace_manager.get_rag(workspace)
+            graph = await rag.get_knowledge_graph(
+                node_label="*", max_depth=max_depth, max_nodes=max_nodes
+            )
+            return graph
+        except Exception as exc:
+            logger.error("Error getting graph for workspace '%s': %s", workspace, exc)
+            raise HTTPException(status_code=500, detail=str(exc))
 
     # ── List sessions ─────────────────────────────────────────────────────────
 

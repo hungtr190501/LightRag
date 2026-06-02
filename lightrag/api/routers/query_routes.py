@@ -342,6 +342,11 @@ class QueryRequest(BaseModel):
         description="If True, enables streaming output for real-time responses. Only affects /query/stream endpoint.",
     )
 
+    enable_agentic: Optional[bool] = Field(
+        default=False,
+        description="If True, applies agentic pre-processing: query rewriting, legal keyword extraction, and multi-hop retrieval for complex questions.",
+    )
+
     @field_validator("query", mode="after")
     @classmethod
     def query_strip_after(cls, query: str) -> str:
@@ -366,7 +371,7 @@ class QueryRequest(BaseModel):
         # Use Pydantic's `.model_dump(exclude_none=True)` to remove None values automatically
         # Exclude API-level parameters that don't belong in QueryParam
         request_data = self.model_dump(
-            exclude_none=True, exclude={"query", "include_chunk_content"}
+            exclude_none=True, exclude={"query", "include_chunk_content", "enable_agentic"}
         )
 
         # Ensure `mode` and `stream` are set explicitly
@@ -900,6 +905,36 @@ def create_query_routes(get_rag, api_key: Optional[str] = None, top_k: int = 60)
 
             from fastapi.responses import StreamingResponse
 
+            # ── Agentic path ──────────────────────────────────────────────────
+            if request.enable_agentic:
+                from lightrag.api.routers.agentic_rag import agentic_query_stream
+
+                async def agentic_generator():
+                    try:
+                        async for line in agentic_query_stream(
+                            query=request.query,
+                            rag=rag,
+                            param=param,
+                            include_refs=bool(request.include_references),
+                            include_chunk_content=bool(request.include_chunk_content),
+                        ):
+                            yield line
+                    except Exception as exc:
+                        logger.error(f"[agentic] stream error: {exc}", exc_info=True)
+                        yield f"{json.dumps({'error': str(exc)})}\n"
+
+                return StreamingResponse(
+                    agentic_generator(),
+                    media_type="application/x-ndjson",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "Content-Type": "application/x-ndjson",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+
+            # ── Standard path ─────────────────────────────────────────────────
             # Unified approach: always use aquery_llm for all cases
             result = await rag.aquery_llm(request.query, param=param)
 
