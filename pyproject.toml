@@ -59,7 +59,7 @@ api = [
     "nano-vectordb",
     "networkx",
     "numpy>=1.24.0,<3.0.0",
-    "openai>=2.0.0,<3.0.0",
+    "openai>=2.0.0,<4.0.0",
     "pandas>=2.0.0,<2.4.0",
     "pipmaster",
     "pydantic",
@@ -121,12 +121,12 @@ legal = [
     "FlagEmbedding>=1.2.0",         # BGE-M3 dense + sparse embeddings
     "qdrant-client>=1.16.0,<2.0.0", # Qdrant vector DB
     "neo4j>=5.0.0,<7.0.0",          # Legal knowledge graph
-    "openai>=2.0.0,<3.0.0",         # vLLM OpenAI-compatible client
+    "openai>=2.0.0,<4.0.0",         # vLLM OpenAI-compatible client
 ]
 
 offline-llm = [
     # LLM provider dependencies
-    "openai>=2.0.0,<3.0.0",
+    "openai>=2.0.0,<4.0.0",
     "anthropic>=0.18.0,<1.0.0",
     "ollama>=0.1.0,<1.0.0",
     "zhipuai>=2.0.0,<3.0.0",
